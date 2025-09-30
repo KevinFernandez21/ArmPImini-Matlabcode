@@ -122,13 +122,24 @@ classdef ArmPiController < handle
                 warning('Z fuera de rango recomendado [13, 18]');
             end
             
-            % Preparar datos: [x, y, z, duration]
-            % 3 doubles (24 bytes) + 1 int32 (4 bytes) = 28 bytes total
-            data = [double(x), double(y), double(z), double(duration)];
+            % ✅ CORRECCIÓN: Preparar datos correctamente
+            % Método 1: Convertir todo a bytes y concatenar
+            data_doubles = [double(x), double(y), double(z)];
+            dataBytes_xyz = typecast(data_doubles, 'uint8');
+            dataBytes_duration = typecast(int32(duration), 'uint8');
             
-            % CRÍTICO: El último elemento debe ser int32, no double
-            % Reemplazar el último elemento con la versión correcta
-            data(4) = typecast(int32(duration), 'double');
+            % Concatenar todos los bytes
+            allBytes = [dataBytes_xyz, dataBytes_duration];
+            
+            % Convertir de vuelta a doubles para sendCommand
+            % Rellenar con ceros si es necesario para completar múltiplos de 8
+            totalBytes = length(allBytes);
+            if mod(totalBytes, 8) ~= 0
+                padding = 8 - mod(totalBytes, 8);
+                allBytes = [allBytes, zeros(1, padding, 'uint8')];
+            end
+            
+            data = typecast(allBytes, 'double');
             
             fprintf('→ Moviendo a X=%.2f, Y=%.2f, Z=%.2f (%.0fms)\n', x, y, z, duration);
             [success, msg] = obj.sendCommand(obj.CMD_MOVE_XYZ, data);
@@ -143,19 +154,12 @@ classdef ArmPiController < handle
         %% MOVER CON CONTROL DE ÁNGULOS
         function [success, msg] = moveWithAngles(obj, x, y, z, alpha, alpha1, alpha2, duration)
             % Mover brazo con control completo de ángulos
-            %
-            % Parámetros:
-            %   x, y, z       - Posición en mm
-            %   alpha         - Ángulo de rotación del efector (-180 a 180)
-            %   alpha1        - Ángulo límite inferior (-180 a 0)
-            %   alpha2        - Ángulo límite superior (0 a 180)
-            %   duration      - Tiempo de movimiento en ms
             
             if nargin < 8
                 duration = 1500;
             end
             
-            % Validar rangos (opcional)
+            % Validar rangos
             if alpha < -180 || alpha > 180
                 warning('Alpha fuera de rango [-180, 180]');
             end
@@ -166,25 +170,50 @@ classdef ArmPiController < handle
                 warning('Alpha2 fuera de rango [0, 180]');
             end
             
-            % Preparar datos: [x, y, z, alpha, alpha1, alpha2, duration]
-            % 6 doubles (48 bytes) + 1 int32 (4 bytes) = 52 bytes total
-            data = [double(x), double(y), double(z), ...
-                    double(alpha), double(alpha1), double(alpha2), ...
-                    double(duration)];
+            % ✅ CORRECCIÓN: Preparar datos como bytes
+            angles_data = [double(x), double(y), double(z), ...
+                           double(alpha), double(alpha1), double(alpha2)];
             
-            % CRÍTICO: El último elemento debe ser int32
-            data(7) = typecast(int32(duration), 'double');
+            angles_bytes = typecast(angles_data, 'uint8');
+            dur_bytes = typecast(int32(duration), 'uint8');
+            
+            data_bytes = [angles_bytes, dur_bytes];
             
             fprintf('→ Moviendo a X=%.2f, Y=%.2f, Z=%.2f\n', x, y, z);
             fprintf('  Ángulos: α=%.1f°, α1=%.1f°, α2=%.1f° (%.0fms)\n', ...
                     alpha, alpha1, alpha2, duration);
             
-            [success, msg] = obj.sendCommand(obj.CMD_MOVE_ANGLES, data);
+            % Enviar comando directamente
+            if ~obj.isConnected
+                error('No conectado al brazo robótico');
+            end
             
-            if success
-                fprintf('✓ Movimiento completado\n');
-            else
-                fprintf('✗ Error: %s\n', msg);
+            try
+                write(obj.tcpClient, uint8(obj.CMD_MOVE_ANGLES), 'uint8');
+                write(obj.tcpClient, int32(length(data_bytes)), 'int32');
+                write(obj.tcpClient, data_bytes, 'uint8');
+                
+                success = read(obj.tcpClient, 1, 'uint8');
+                msgLength = read(obj.tcpClient, 1, 'int32');
+                
+                if msgLength > 0
+                    msgBytes = read(obj.tcpClient, double(msgLength), 'uint8');
+                    msg = char(msgBytes');
+                else
+                    msg = 'OK';
+                end
+                
+                success = logical(success);
+                
+                if success
+                    fprintf('✓ Movimiento completado\n');
+                else
+                    fprintf('✗ Error: %s\n', msg);
+                end
+                
+            catch e
+                success = false;
+                msg = sprintf('Error: %s', e.message);
             end
         end
         
